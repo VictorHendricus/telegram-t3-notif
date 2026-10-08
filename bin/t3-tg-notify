@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Telegram notifications for Claude Code and Codex hooks.
+#
+# Usage (from a hook): t3-tg-notify <claude|codex>   (hook JSON on stdin)
+#
+# Never blocks or fails the agent: every path exits 0, and Telegram calls
+# run detached in the background.
+
+AGENT="${1:-agent}"
+CONFIG_DIR="${T3TG_CONFIG_DIR:-$HOME/.config/t3-telegram-notify}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/t3-telegram-notify"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+
+QUESTION_TOOLS='^(AskUserQuestion|request_user_input)$'
+
+exit_ok() { exit 0; }
+
+# Read KEY=VALUE lines without executing the file.
+load_env() {
+  local file="$CONFIG_DIR/.env" key value
+  [[ -r "$file" ]] || return 0
+  while IFS='=' read -r key value; do
+    key="${key//[[:space:]]/}"
+    [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+    value="${value%$'\r'}"
+    value="${value%%[[:space:]]#*}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value#\"}"; value="${value%\"}"
+    value="${value#\'}"; value="${value%\'}"
+    printf -v "$key" '%s' "$value"
+  done < "$file"
+}
+
+load_env
+REMINDER_MINUTES="${REMINDER_MINUTES:-10}"
+MIN_TURN_MINUTES="${MIN_TURN_MINUTES:-5}"
+
+[[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] || exit_ok
+command -v jq >/dev/null && command -v curl >/dev/null || exit_ok
+mkdir -p "$STATE_DIR" 2>/dev/null || exit_ok
+
+# Internal mode: delayed reminder for an unanswered question.
+if [[ "$AGENT" == "--remind" ]]; then
+  marker="$2" text="$3"
+  sleep "$((REMINDER_MINUTES * 60))"
+  if [[ -f "$marker" ]]; then
+    rm -f "$marker"
+    "$SELF" --send "$text"
+  fi
+  exit_ok
+fi
+
+# Internal mode: synchronous send (always called detached).
+if [[ "$AGENT" == "--send" ]]; then
+  curl -sS --max-time 15 -o /dev/null \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "text=$2" \
+    -d "disable_web_page_preview=true" 2>/dev/null
+  exit_ok
+fi
+
+detach() { setsid -f "$SELF" "$@" </dev/null >/dev/null 2>&1; }
+send() { detach --send "$1"; }
+
+INPUT="$(cat)"
+[[ -n "${T3TG_DEBUG:-}" ]] && printf '%s %s %s\n' "$(date -Is)" "$AGENT" "$INPUT" >> "$STATE_DIR/debug.log"
+
+field() { jq -r "$1 // empty" <<<"$INPUT" 2>/dev/null; }
+
+EVENT="$(field .hook_event_name)"
+SESSION="$(field .session_id)"
+SESSION="${SESSION//[^A-Za-z0-9_-]/}"
+CWD="$(field .cwd)"
+PROJECT="$(basename "${CWD:-?}")"
+case "$AGENT" in
+  claude) LABEL="Claude" ;;
+  codex) LABEL="Codex" ;;
+  *) LABEL="$AGENT" ;;
+esac
+HEADER="${LABEL} · ${PROJECT}"
+
+truncate_text() {
+  local max="$1" s; s="$(cat)"
+  if (( ${#s} > max )); then printf '%s…' "${s:0:max}"; else printf '%s' "$s"; fi
+}
+
+clear_pending() { rm -f "$STATE_DIR/pending-$SESSION-"* 2>/dev/null; }
+
+case "$EVENT" in
+  UserPromptSubmit)
+    date +%s > "$STATE_DIR/start-$SESSION"
+    clear_pending
+    ;;
+
+  PreToolUse)
+    tool="$(field .tool_name)"
+    [[ "$tool" =~ $QUESTION_TOOLS ]] || exit_ok
+    questions="$(jq -r '
+      (.tool_input.questions // []) | map(
+        "❓ " + (.question // "") +
+        ((.options // []) | map("\n   • " + (.label // tostring)) | join(""))
+      ) | join("\n\n")' <<<"$INPUT" 2>/dev/null)"
+    [[ -n "$questions" ]] || questions="$(jq -c '.tool_input' <<<"$INPUT" 2>/dev/null)"
+    questions="$(truncate_text 3000 <<<"$questions")"
+    send "🙋 ${HEADER} is asking you:
+
+${questions}"
+    if (( REMINDER_MINUTES > 0 )); then
+      id="$(field .tool_use_id)"; id="${id//[^A-Za-z0-9_-]/}"
+      marker="$STATE_DIR/pending-$SESSION-${id:-$(date +%s)}"
+      : > "$marker"
+      detach --remind "$marker" "⏰ Reminder: ${HEADER} is still waiting for your answer.
+
+${questions}"
+    fi
+    ;;
+
+  PostToolUse)
+    tool="$(field .tool_name)"
+    [[ "$tool" =~ $QUESTION_TOOLS ]] || exit_ok
+    id="$(field .tool_use_id)"; id="${id//[^A-Za-z0-9_-]/}"
+    if [[ -n "$id" ]]; then rm -f "$STATE_DIR/pending-$SESSION-$id"; else clear_pending; fi
+    ;;
+
+  Notification)
+    # Question forms already notify via PreToolUse; only forward real approvals.
+    [[ "$(field .notification_type)" == "permission_prompt" ]] || exit_ok
+    msg="$(field .message)"
+    [[ "$msg" == *AskUserQuestion* ]] && exit_ok
+    send "🔐 ${HEADER} needs approval:
+${msg}"
+    ;;
+
+  Stop)
+    [[ "$(field .stop_hook_active)" == "true" ]] && exit_ok
+    clear_pending
+    start_file="$STATE_DIR/start-$SESSION"
+    [[ -f "$start_file" ]] || exit_ok
+    start="$(cat "$start_file")"; rm -f "$start_file"
+    elapsed=$(( $(date +%s) - start ))
+    (( elapsed >= MIN_TURN_MINUTES * 60 )) || exit_ok
+    summary="$(field .last_assistant_message | truncate_text 1500)"
+    send "✅ ${HEADER} finished ($((elapsed / 60))m $((elapsed % 60))s)
+
+${summary}"
+    ;;
+esac
+
+# Drop stale state from sessions that never reached Stop.
+find "$STATE_DIR" -maxdepth 1 -type f \( -name 'start-*' -o -name 'pending-*' \) -mtime +2 -delete 2>/dev/null
+exit_ok
