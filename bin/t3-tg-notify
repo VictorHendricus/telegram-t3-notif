@@ -11,7 +11,7 @@ CONFIG_DIR="${T3TG_CONFIG_DIR:-$HOME/.config/t3-telegram-notify}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/t3-telegram-notify"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 
-QUESTION_TOOLS='^(AskUserQuestion|request_user_input)$'
+QUESTION_TOOLS='^(AskUserQuestion|request_user_input(_async)?)$'
 
 exit_ok() { exit 0; }
 
@@ -100,8 +100,8 @@ case "$EVENT" in
     [[ "$tool" =~ $QUESTION_TOOLS ]] || exit_ok
     questions="$(jq -r '
       (.tool_input.questions // []) | map(
-        "❓ " + (.question // "") +
-        ((.options // []) | map("\n   • " + (.label // tostring)) | join(""))
+        "❓ " + (.question // .title // "") +
+        ((.options // []) | map("\n   • " + (if type == "object" then (.label // tostring) else tostring end)) | join(""))
       ) | join("\n\n")' <<<"$INPUT" 2>/dev/null)"
     [[ -n "$questions" ]] || questions="$(jq -c '.tool_input' <<<"$INPUT" 2>/dev/null)"
     questions="$(truncate_text 3000 <<<"$questions")"
@@ -121,6 +121,9 @@ ${questions}"
   PostToolUse)
     tool="$(field .tool_name)"
     [[ "$tool" =~ $QUESTION_TOOLS ]] || exit_ok
+    # Async question tools return before the user answers; the answer arrives
+    # as the next prompt, which clears the reminder in UserPromptSubmit.
+    [[ "$tool" == *_async ]] && exit_ok
     id="$(field .tool_use_id)"; id="${id//[^A-Za-z0-9_-]/}"
     if [[ -n "$id" ]]; then rm -f "$STATE_DIR/pending-$SESSION-$id"; else clear_pending; fi
     ;;
@@ -136,7 +139,6 @@ ${msg}"
 
   Stop)
     [[ "$(field .stop_hook_active)" == "true" ]] && exit_ok
-    clear_pending
     start_file="$STATE_DIR/start-$SESSION"
     [[ -f "$start_file" ]] || exit_ok
     start="$(cat "$start_file")"; rm -f "$start_file"
