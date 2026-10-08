@@ -19,8 +19,9 @@ the Telegram Bot API with `curl` and exits. Only bash, curl and jq are needed.
 ./install.sh
 ```
 
-1. Fill in `~/.config/t3-telegram-notify/.env` (`TELEGRAM_BOT_TOKEN`, and your
-   numeric user ID as `TELEGRAM_CHAT_ID`).
+1. Fill in `~/.config/t3-telegram-notify/.env` (`TELEGRAM_BOT_TOKEN` and your
+   numeric `TELEGRAM_USER_ID`; messages go only to that user's private chat
+   with the bot).
 2. Send `/start` to your bot once.
 3. Codex: run `codex` in a terminal once and approve the new hooks.
 

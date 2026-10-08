@@ -20,7 +20,7 @@ chmod 700 "$CONFIG_DIR"
 if [[ ! -e "$CONFIG_DIR/.env" ]]; then
   printf '%s\n' \
     '# Telegram credentials for t3-telegram-notify (keep this file private: chmod 600)' \
-    'TELEGRAM_BOT_TOKEN=' 'TELEGRAM_CHAT_ID=' > "$CONFIG_DIR/.env"
+    'TELEGRAM_BOT_TOKEN=' 'TELEGRAM_USER_ID=' > "$CONFIG_DIR/.env"
   chmod 600 "$CONFIG_DIR/.env"
 fi
 

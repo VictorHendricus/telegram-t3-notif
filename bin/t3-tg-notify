@@ -35,7 +35,9 @@ load_env
 REMINDER_MINUTES="${REMINDER_MINUTES:-10}"
 MIN_TURN_MINUTES="${MIN_TURN_MINUTES:-5}"
 
-[[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] || exit_ok
+# Private chat with the bot only: a user ID is a positive number
+# (group and channel IDs are negative, so they are rejected).
+[[ -n "$TELEGRAM_BOT_TOKEN" && "$TELEGRAM_USER_ID" =~ ^[1-9][0-9]*$ ]] || exit_ok
 command -v jq >/dev/null && command -v curl >/dev/null || exit_ok
 mkdir -p "$STATE_DIR" 2>/dev/null || exit_ok
 
@@ -54,7 +56,7 @@ fi
 if [[ "$AGENT" == "--send" ]]; then
   curl -sS --max-time 15 -o /dev/null \
     "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "chat_id=${TELEGRAM_USER_ID}" \
     --data-urlencode "text=$2" \
     -d "disable_web_page_preview=true" 2>/dev/null
   exit_ok
