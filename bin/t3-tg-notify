@@ -87,7 +87,19 @@ truncate_text() {
   if (( ${#s} > max )); then printf '%s…' "${s:0:max}"; else printf '%s' "$s"; fi
 }
 
-clear_pending() { rm -f "$STATE_DIR/pending-$SESSION-"* 2>/dev/null; }
+clear_pending() { rm -f "$STATE_DIR/pending-$SESSION-"* "$STATE_DIR/asked-$SESSION-"* 2>/dev/null; }
+
+format_questions() {
+  jq -r '
+    (.tool_input.questions // []) | map(
+      "❓ " + (.question // .title // "") +
+      ((.options // []) | map("\n   • " + (if type == "object" then (.label // tostring) else tostring end)) | join(""))
+    ) | join("\n\n")' <<<"$INPUT" 2>/dev/null
+}
+
+# Identifies a question by its content, so a re-asked question (retry, or an
+# async tool called again) is treated as the same one.
+question_key() { jq -cS '.tool_input.questions // .tool_input' <<<"$INPUT" 2>/dev/null | md5sum | cut -c1-16; }
 
 case "$EVENT" in
   UserPromptSubmit)
@@ -98,19 +110,19 @@ case "$EVENT" in
   PreToolUse)
     tool="$(field .tool_name)"
     [[ "$tool" =~ $QUESTION_TOOLS ]] || exit_ok
-    questions="$(jq -r '
-      (.tool_input.questions // []) | map(
-        "❓ " + (.question // .title // "") +
-        ((.options // []) | map("\n   • " + (if type == "object" then (.label // tostring) else tostring end)) | join(""))
-      ) | join("\n\n")' <<<"$INPUT" 2>/dev/null)"
+    # Notify and remind only once per question until the user next replies.
+    key="$(question_key)"
+    asked="$STATE_DIR/asked-$SESSION-$key"
+    [[ -f "$asked" ]] && exit_ok
+    : > "$asked"
+    questions="$(format_questions)"
     [[ -n "$questions" ]] || questions="$(jq -c '.tool_input' <<<"$INPUT" 2>/dev/null)"
     questions="$(truncate_text 3000 <<<"$questions")"
     send "🙋 ${HEADER} is asking you:
 
 ${questions}"
     if (( REMINDER_MINUTES > 0 )); then
-      id="$(field .tool_use_id)"; id="${id//[^A-Za-z0-9_-]/}"
-      marker="$STATE_DIR/pending-$SESSION-${id:-$(date +%s)}"
+      marker="$STATE_DIR/pending-$SESSION-$key"
       : > "$marker"
       detach --remind "$marker" "⏰ Reminder: ${HEADER} is still waiting for your answer.
 
@@ -124,8 +136,7 @@ ${questions}"
     # Async question tools return before the user answers; the answer arrives
     # as the next prompt, which clears the reminder in UserPromptSubmit.
     [[ "$tool" == *_async ]] && exit_ok
-    id="$(field .tool_use_id)"; id="${id//[^A-Za-z0-9_-]/}"
-    if [[ -n "$id" ]]; then rm -f "$STATE_DIR/pending-$SESSION-$id"; else clear_pending; fi
+    rm -f "$STATE_DIR/pending-$SESSION-$(question_key)"
     ;;
 
   Notification)
@@ -152,5 +163,5 @@ ${summary}"
 esac
 
 # Drop stale state from sessions that never reached Stop.
-find "$STATE_DIR" -maxdepth 1 -type f \( -name 'start-*' -o -name 'pending-*' \) -mtime +2 -delete 2>/dev/null
+find "$STATE_DIR" -maxdepth 1 -type f \( -name 'start-*' -o -name 'pending-*' -o -name 'asked-*' \) -mtime +2 -delete 2>/dev/null
 exit_ok

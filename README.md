@@ -6,7 +6,7 @@ it works for agent sessions started from T3 and from the terminal alike.
 | Event | Message |
 |---|---|
 | Agent opens a question form | 🙋 the question and its options |
-| Question still unanswered after `REMINDER_MINUTES` | ⏰ reminder |
+| Question still unanswered after `REMINDER_MINUTES` | ⏰ one reminder (re-asking the same question sends nothing new) |
 | Approval prompt (Claude, non-full-access mode) | 🔐 what needs approval |
 | Turn finished after at least `MIN_TURN_MINUTES` | ✅ duration and the agent's final message |
 
